@@ -3,11 +3,11 @@ import sqlite3
 from telethon import TelegramClient, events
 
 # 1. Ваши данные от Telegram (получите на my.telegram.org)
-API_ID = 36052099  # Замените на ваш api_id (число)
-API_HASH = '6bfd2f0c5961f6d5c4a8e7460f23edbb'  # Замените на ваш api_hash (строка)
+API_ID =   #api_id 
+API_HASH = ''  #api_hash
 
-# ID или юзернейм вашей группы СНО (обязательно с минусом, если это супергруппа, например: -100123456789)
-TARGET_GROUP_ID = -1004480288950
+# ID или юзернейм группы 
+TARGET_GROUP_ID =
 
 client = TelegramClient('sno_session', API_ID, API_HASH)
 
