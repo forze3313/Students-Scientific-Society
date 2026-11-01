@@ -10,10 +10,11 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 API_TOKEN = ''  
 
+# Список ID администраторов
+ADMIN_IDS = []
+
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
-
-
 class BotStates(StatesGroup):
     waiting_for_category_name = State()
     waiting_for_username = State()
@@ -27,17 +28,24 @@ def get_db():
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     if message.chat.type != "private":
-        return  # Команда /start работает в ЛС
+        return
 
+    user_id = message.from_user.id
+
+    # Кнопки, доступные всем участникам
     kb = [
-        [InlineKeyboardButton(text="📁 Категории", callback_data="show_categories")],
+        [InlineKeyboardButton(text="📋 Мои отделы", callback_data="my_departments")],
         [InlineKeyboardButton(text="🔔 Меню пинга", callback_data="ping_menu")]
     ]
+
+    # Если пользователь — администратор, добавляем кнопку админ-панели
+    if user_id in ADMIN_IDS:
+        kb.append([InlineKeyboardButton(text="📁 Управление категориями (Админ)", callback_data="show_categories")])
+
     keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
     await message.answer(
         "Привет! Я бот СНО для управления участниками.\n\n"
-        "💡 **Как пинговать в группе:**\n"
-        "Напишите в чате группы: `/ping Название Категории` (например: `/ping Пресса`)",
+        "👇 Нажмите **«📋 Мои отделы»**, чтобы выбрать или убрать свои направления.",
         reply_markup=keyboard,
         parse_mode="Markdown"
     )
@@ -81,9 +89,83 @@ async def cmd_ping_group(message: types.Message):
         await message.answer(text, parse_mode="Markdown")
 
 
-# 3. Управление категориями (Кнопки)
+# --- ЛИЧНЫЙ КАБИНЕТ: ВЫБОР И СНЯТИЕ КАТЕГОРИЙ КНОПКАМИ ---
+
+@dp.callback_query(F.data == "my_departments")
+async def open_my_departments(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    conn = get_db()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT id, name FROM categories")
+    categories = cursor.fetchall()
+
+    cursor.execute("SELECT category_id FROM user_categories WHERE user_id = ?", (user_id,))
+    user_cat_ids = {row[0] for row in cursor.fetchall()}
+    conn.close()
+
+    kb = []
+    for cat_id, cat_name in categories:
+        if cat_id in user_cat_ids:
+            btn_text = f"✅ {cat_name}"
+        else:
+            btn_text = f"❌ {cat_name}"
+
+        kb.append([InlineKeyboardButton(text=btn_text, callback_data=f"toggle_cat_{cat_id}")])
+
+    kb.append([InlineKeyboardButton(text="🔙 На главную", callback_data="back_main")])
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
+
+    text = (
+        "📋 **Ваши направления в СНО:**\n\n"
+        "Нажмите на отдел, чтобы **вступить** в него или **выйти** из него (галочка изменится автоматически):"
+    )
+
+    if callback.message.text != text:
+        await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="Markdown")
+    else:
+        await callback.message.edit_reply_markup(reply_markup=keyboard)
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("toggle_cat_"))
+async def toggle_category(callback: types.CallbackQuery):
+    cat_id = int(callback.data.split("_")[2])
+    user_id = callback.from_user.id
+
+    conn = get_db()
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT 1 FROM user_categories WHERE user_id = ? AND category_id = ?", (user_id, cat_id))
+    exists = cursor.fetchone()
+
+    if exists:
+        cursor.execute("DELETE FROM user_categories WHERE user_id = ? AND category_id = ?", (user_id, cat_id))
+        action_text = "Вы вышли из отдела."
+    else:
+        try:
+            cursor.execute("INSERT INTO user_categories (user_id, category_id) VALUES (?, ?)", (user_id, cat_id))
+            action_text = "Вы успешно вступили в отдел!"
+        except sqlite3.IntegrityError:
+            pass
+
+    conn.commit()
+    conn.close()
+
+    await callback.answer(action_text)
+    await open_my_departments(callback)
+
+
+# ------------------------------------------------------------------------
+
+# 3. Админское управление категориями (С ЗАЩИТОЙ ПО ADMIN_IDS)
 @dp.callback_query(F.data == "show_categories")
 async def show_categories(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("⛔ У вас нет прав администратора!", show_alert=True)
+        return
+
     conn = get_db()
     cursor = conn.cursor()
     cursor.execute("SELECT id, name FROM categories")
@@ -104,6 +186,10 @@ async def show_categories(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "add_category")
 async def add_category_start(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("⛔ У вас нет прав!", show_alert=True)
+        return
+
     await callback.message.answer("Введите название новой категории (например: Пресса):")
     await state.set_state(BotStates.waiting_for_category_name)
     await callback.answer()
@@ -111,6 +197,9 @@ async def add_category_start(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.message(BotStates.waiting_for_category_name)
 async def save_category(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+
     cat_name = message.text.strip()
     conn = get_db()
     cursor = conn.cursor()
@@ -127,6 +216,10 @@ async def save_category(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("cat_"))
 async def view_category(callback: types.CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("⛔ У вас нет прав!", show_alert=True)
+        return
+
     cat_id = int(callback.data.split("_")[1])
 
     conn = get_db()
@@ -154,7 +247,7 @@ async def view_category(callback: types.CallbackQuery):
         text += "В этой категории пока нет участников."
 
     kb = [
-        [InlineKeyboardButton(text="➕ Добавить участника", callback_data=f"add_user_{cat_id}")],
+        [InlineKeyboardButton(text="➕ Добавить участника вручную", callback_data=f"add_user_{cat_id}")],
         [InlineKeyboardButton(text="🔙 Назад к категориям", callback_data="show_categories")]
     ]
     keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
@@ -164,6 +257,10 @@ async def view_category(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("add_user_"))
 async def start_add_user(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("⛔ У вас нет прав!", show_alert=True)
+        return
+
     cat_id = int(callback.data.split("_")[2])
     await state.update_data(category_id=cat_id)
     await state.set_state(BotStates.waiting_for_username)
@@ -176,6 +273,9 @@ async def start_add_user(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.message(BotStates.waiting_for_username)
 async def save_user_to_category(message: types.Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+
     text_input = message.text.strip()
     data = await state.get_data()
     cat_id = data.get("category_id")
@@ -183,17 +283,14 @@ async def save_user_to_category(message: types.Message, state: FSMContext):
     conn = get_db()
     cursor = conn.cursor()
 
-    # 1. Пытаемся вытащить ID из ссылки вида tg://user?id=...
     match_id = re.search(r'id=(\d+)', text_input)
 
     if match_id:
         user_id = int(match_id.group(1))
         cursor.execute("SELECT user_id, full_name FROM users WHERE user_id = ?", (user_id,))
-    # 2. Если ввели просто цифры (чистый ID)
     elif text_input.isdigit():
         user_id = int(text_input)
         cursor.execute("SELECT user_id, full_name FROM users WHERE user_id = ?", (user_id,))
-    # 3. Если ввели обычный username (например, @ivanov)
     else:
         username = text_input.lstrip('@')
         cursor.execute("SELECT user_id, full_name FROM users WHERE LOWER(username) = LOWER(?)", (username,))
@@ -249,10 +346,16 @@ async def trigger_ping(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "back_main")
 async def back_main(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+
     kb = [
-        [InlineKeyboardButton(text="📁 Категории", callback_data="show_categories")],
+        [InlineKeyboardButton(text="📋 Мои отделы", callback_data="my_departments")],
         [InlineKeyboardButton(text="🔔 Меню пинга", callback_data="ping_menu")]
     ]
+
+    if user_id in ADMIN_IDS:
+        kb.append([InlineKeyboardButton(text="📁 Управление категориями (Админ)", callback_data="show_categories")])
+
     keyboard = InlineKeyboardMarkup(inline_keyboard=kb)
     await callback.message.edit_text("Главное меню:", reply_markup=keyboard)
     await callback.answer()
@@ -260,7 +363,7 @@ async def back_main(callback: types.CallbackQuery):
 
 async def main():
     logging.basicConfig(level=logging.INFO)
-    print("Бот успешно запущен и готов к работе!")
+    print("Бот успешно запущен и защищен!")
     await dp.start_polling(bot)
 
 
